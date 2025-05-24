@@ -281,14 +281,92 @@ def fetch_shots(pid: int,
                 print(f"Maximum retries exceeded for player {pid} in season {season}")
                 return pd.Series(dtype=np.int8)  # Return empty series
 
+# Interactive imports
+try:
+    import questionary
+    from rich.console import Console
+    INTERACTIVE_AVAILABLE = True
+except ImportError:
+    INTERACTIVE_AVAILABLE = False
+
+console = Console() if INTERACTIVE_AVAILABLE else None
+
+
+def interactive_player_setup():
+    """Interactive setup for individual player analysis."""
+    if not INTERACTIVE_AVAILABLE:
+        print("❌ Interactive mode requires 'questionary' and 'rich'")
+        print("📦 Install with: pip install questionary rich")
+        sys.exit(1)
+    
+    from rich.panel import Panel
+    
+    # Welcome message
+    console.print(Panel.fit(
+        "[bold blue]🏀 NBA Player Streakiness Analysis[/bold blue]\n"
+        "Analyze specific players' shooting streakiness\n"
+        "[dim]Press Ctrl+C anytime to exit[/dim]",
+        border_style="blue"
+    ))
+    
+    try:
+        # Player selection
+        console.print("\n[bold]Player Selection[/bold]")
+        players_input = questionary.text(
+            "Enter player names (comma-separated):",
+            default="Stephen Curry",
+            validate=lambda x: len(x.strip()) > 0
+        ).ask()
+        
+        # Season selection  
+        console.print("\n[bold]Season Selection[/bold]")
+        seasons_input = questionary.text(
+            "Enter seasons (comma-separated, e.g. '2023-24,2022-23'):",
+            default="2023-24",
+            validate=lambda x: all(len(s.strip()) == 7 and '-' in s for s in x.split(',')) if x.strip() else False
+        ).ask()
+        
+        # Shot type
+        console.print("[dim]Use arrow keys to navigate, ENTER to select[/dim]")
+        shot_type = questionary.select(
+            "Shot type to analyze:",
+            choices=["All", "3PT Field Goal", "2PT Field Goal"],
+            default="3PT Field Goal"
+        ).ask()
+        
+        # Metric
+        console.print("[dim]Use arrow keys to navigate, ENTER to select[/dim]")
+        metric = questionary.select(
+            "Streakiness metric:",
+            choices=[
+                questionary.Choice("Run-based index S (recommended)", value="run"),
+                questionary.Choice("Legacy momentum score", value="momentum")
+            ],
+            default="run"
+        ).ask()
+        
+        return {
+            'players': [p.strip() for p in players_input.split(',')],
+            'seasons': [s.strip() for s in seasons_input.split(',')],
+            'shot_type': shot_type,
+            'metric': metric
+        }
+        
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n👋 Analysis cancelled")
+        sys.exit(0)
+
+
 # ----------------------------------------------------------------------
 # CLI glue
 # ----------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Compute shooting streakiness metrics")
-    ap.add_argument("--players", required=True,
+    ap.add_argument("--interactive", "-i", action="store_true",
+                    help="Launch interactive mode (default if no other args provided)")
+    ap.add_argument("--players",
                     help="Comma-separated full names (e.g. 'Stephen Curry,Klay Thompson')")
-    ap.add_argument("--seasons", required=True,
+    ap.add_argument("--seasons",
                     help="Comma-separated seasons (e.g. '2019-20,2020-21')")
     ap.add_argument("--metric", default="run", choices=["run", "momentum"],
                     help="Streakiness metric to use: 'run' (default) or 'momentum' (legacy)")
@@ -304,8 +382,22 @@ def main(argv=None):
                     help="Delay between API calls in seconds")
     args = ap.parse_args(argv)
 
-    names = [n.strip() for n in args.players.split(",") if n.strip()]
-    seasons = [s.strip() for s in args.seasons.split(",") if s.strip()]
+    # Determine if we should use interactive mode
+    use_interactive = args.interactive or (len(sys.argv) == 1 and INTERACTIVE_AVAILABLE)
+    
+    if use_interactive:
+        config = interactive_player_setup()
+        names = config['players']
+        seasons = config['seasons']
+        args.shot_type = config['shot_type']
+        args.metric = config['metric']
+    else:
+        if not args.players or not args.seasons:
+            print("Error: --players and --seasons are required when not using interactive mode")
+            print("Use --interactive or -i for guided setup")
+            sys.exit(1)
+        names = [n.strip() for n in args.players.split(",") if n.strip()]
+        seasons = [s.strip() for s in args.seasons.split(",") if s.strip()]
 
     rows = []
     for name in tqdm(names, desc="Players"):
@@ -357,12 +449,36 @@ def main(argv=None):
     df = pd.DataFrame(rows)
     if args.metric == "run":
         df = df.sort_values("score", ascending=True)  # Lower S = more streaky
-        print("Results (sorted by streakiness index S, lower = more streaky):")
+        sort_desc = "Results (sorted by streakiness index S, lower = more streaky):"
     else:
         df = df.sort_values("score", ascending=False)  # Higher momentum = more streaky
-        print("Results (sorted by momentum score, higher = more streaky):")
+        sort_desc = "Results (sorted by momentum score, higher = more streaky):"
     
-    print(df.to_string(index=False))
+    # Enhanced output if Rich is available and we're in interactive mode
+    if use_interactive and console:
+        from rich.table import Table
+        
+        table = Table(title="🏀 Player Streakiness Analysis", show_header=True, header_style="bold magenta")
+        table.caption = sort_desc
+        table.add_column("Player", style="white", width=20)
+        table.add_column("Shots", style="green", justify="right")
+        table.add_column("Metric", style="cyan", justify="center")
+        table.add_column("Score", style="red bold", justify="right")
+        
+        for _, row in df.iterrows():
+            table.add_row(
+                row['player'][:19],
+                str(row['shots']),
+                row['metric'],
+                str(row['score'])
+            )
+        
+        console.print("\n")
+        console.print(table)
+        console.print(f"\n🎉 Analysis completed for {len(df)} player(s)!")
+    else:
+        print(sort_desc)
+        print(df.to_string(index=False))
 
 
 if __name__ == "__main__":

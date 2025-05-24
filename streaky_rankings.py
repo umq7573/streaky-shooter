@@ -22,11 +22,220 @@ from nba_api.stats.library.parameters import SeasonTypeAllStar
 # Import the streakiness functions from streaky.py
 from streaky import run_based_streakiness, momentum_score, get_headers
 
+# Interactive and enhanced output imports
+try:
+    import questionary
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+    INTERACTIVE_AVAILABLE = True
+except ImportError:
+    INTERACTIVE_AVAILABLE = False
+
+console = Console() if 'Console' in globals() else None
+
+
+def get_current_season():
+    """Get the current NBA season string."""
+    from datetime import datetime
+    year = datetime.now().year
+    month = datetime.now().month
+    
+    # NBA season runs roughly October to June
+    if month >= 10:  # October-December
+        return f"{year}-{str(year + 1)[2:]}"
+    else:  # January-September
+        return f"{year - 1}-{str(year)[2:]}"
+
+
+def interactive_setup():
+    """Interactive setup for analysis parameters."""
+    if not INTERACTIVE_AVAILABLE:
+        console.print("❌ Interactive mode requires 'questionary' and 'rich'")
+        console.print("📦 Install with: pip install questionary rich")
+        sys.exit(1)
+    
+    # Welcome message
+    console.print(Panel.fit(
+        "[bold blue]🏀 NBA Streakiness Analysis[/bold blue]\n"
+        "Analyze the streakiest shooters by minutes played\n"
+        "[dim]Press Ctrl+C anytime to exit[/dim]",
+        border_style="blue"
+    ))
+    
+    try:
+        # Season selection
+        recent_seasons = [
+            f"{year}-{str(year + 1)[2:]}" 
+            for year in range(2024, 2018, -1)  # 2024-25 down to 2019-20
+        ]
+        
+        console.print("\n[bold]Season Selection[/bold]")
+        console.print("[dim]Use arrow keys to navigate, SPACE to select/deselect, ENTER to confirm[/dim]")
+        
+        # Create choices including older seasons option
+        season_choices = [
+            questionary.Choice(season, checked=(season == get_current_season()))
+            for season in recent_seasons
+        ]
+        season_choices.append(questionary.Choice("➕ Add older seasons", value="add_older"))
+        
+        selected_items = questionary.checkbox(
+            "Select seasons to analyze:",
+            choices=season_choices
+        ).ask()
+        
+        # Filter out the "add older seasons" option and get actual seasons
+        selected_seasons = [item for item in selected_items if item != "add_older"]
+        
+        # If user selected to add older seasons, ask for them
+        if "add_older" in selected_items:
+            custom_seasons = questionary.text(
+                "Enter additional seasons (comma-separated, e.g. '2017-18,2016-17'):",
+                validate=lambda x: all(len(s.strip()) == 7 and '-' in s for s in x.split(',')) if x.strip() else True
+            ).ask()
+            if custom_seasons.strip():
+                selected_seasons.extend([s.strip() for s in custom_seasons.split(',')])
+        
+        if not selected_seasons:
+            console.print("❌ No seasons selected")
+            sys.exit(1)
+        
+        # Number of players
+        console.print("\n[bold]Analysis Scope[/bold]")
+        top_n = int(questionary.text(
+            "Number of top players to analyze:",
+            default="50",
+            validate=lambda x: x.isdigit() and 1 <= int(x) <= 500
+        ).ask())
+        
+        # Minimum shots
+        min_shots = int(questionary.text(
+            "Minimum shots required per player:",
+            default="200",
+            validate=lambda x: x.isdigit() and int(x) > 0
+        ).ask())
+        
+        # Shot type
+        console.print("[dim]Use arrow keys to navigate, ENTER to select[/dim]")
+        shot_type = questionary.select(
+            "Shot type to analyze:",
+            choices=[
+                "3PT Field Goal",
+                "2PT Field Goal", 
+                "All"
+            ],
+            default="3PT Field Goal"
+        ).ask()
+        
+        # Metric
+        console.print("[dim]Use arrow keys to navigate, ENTER to select[/dim]")
+        metric = questionary.select(
+            "Streakiness metric:",
+            choices=[
+                questionary.Choice("Run-based index S (recommended)", value="run"),
+                questionary.Choice("Legacy momentum score", value="momentum")
+            ],
+            default="run"
+        ).ask()
+        
+        # Output file
+        save_results = questionary.confirm("Save results to CSV file?", default=True).ask()
+        output_file = None
+        if save_results:
+            default_filename = f"streaky_results_{'_'.join(selected_seasons)}.csv"
+            output_file = questionary.text(
+                "Output filename:",
+                default=default_filename
+            ).ask()
+        
+        return {
+            'seasons': selected_seasons,
+            'top_n': top_n,
+            'min_shots': min_shots,
+            'shot_type': shot_type,
+            'metric': metric,
+            'output': output_file
+        }
+        
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n👋 Analysis cancelled")
+        sys.exit(0)
+
+
+def enhanced_display_results(results_df, config):
+    """Display results with rich formatting."""
+    if console is None:
+        # Fallback to regular display if rich not available
+        print(f"\nAll {len(results_df)} Streakiest Shooters:")
+        if config['metric'] == 'run':
+            score_col = 'STREAKINESS_S'
+            print("(Lower S = more streaky)")
+        else:
+            score_col = 'MOMENTUM_SCORE'
+            print("(Higher momentum = more streaky)")
+        
+        display_cols = ['RANK', 'PLAYER_NAME', 'SHOTS', 'MADE', 'FG_PCT', score_col]
+        print(results_df[display_cols].to_string(index=False))
+        return
+    
+    # Rich display
+    score_col = 'STREAKINESS_S' if config['metric'] == 'run' else 'MOMENTUM_SCORE'
+    
+    # Create title
+    title_text = "🏀 NBA Streakiness Rankings"
+    if config['metric'] == 'run':
+        subtitle = f"All {len(results_df)} players by Run-based Index S (lower = more streaky)"
+    else:
+        subtitle = f"All {len(results_df)} players by Momentum Score (higher = more streaky)"
+    
+    # Create table
+    table = Table(title=title_text, show_header=True, header_style="bold magenta")
+    # Add subtitle as caption instead
+    table.caption = subtitle
+    table.add_column("Rank", style="cyan", justify="center", width=6)
+    table.add_column("Player", style="white", width=20)
+    table.add_column("Shots", style="green", justify="right", width=8)
+    table.add_column("Made", style="green", justify="right", width=8)
+    table.add_column("FG%", style="yellow", justify="right", width=8)
+    table.add_column("Score", style="red bold", justify="right", width=10)
+    
+    # Add rows (all of them)
+    for _, row in results_df.iterrows():
+        table.add_row(
+            str(int(row['RANK'])),
+            row['PLAYER_NAME'][:19],  # Truncate long names
+            str(row['SHOTS']),
+            str(row['MADE']),
+            str(row['FG_PCT']),
+            str(row[score_col])
+        )
+    
+    console.print("\n")
+    console.print(table)
+    
+    # Summary statistics
+    stats_panel = Panel(
+        f"[bold]Analysis Summary[/bold]\n"
+        f"Players analyzed: {len(results_df)}\n"
+        f"Seasons: {', '.join(config['seasons'])}\n" 
+        f"Shot type: {config['shot_type']}\n"
+        f"Min shots: {config['min_shots']}\n"
+        f"Mean score: {results_df[score_col].mean():.3f}\n"
+        f"Score range: {results_df[score_col].min():.3f} - {results_df[score_col].max():.3f}",
+        title="📊 Statistics",
+        border_style="green"
+    )
+    console.print(stats_panel)
+
 
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Analyze streakiness of top NBA shooters')
-    parser.add_argument('--seasons', type=str, required=True,
+    parser.add_argument('--interactive', '-i', action='store_true',
+                      help='Launch interactive mode (default if no other args provided)')
+    parser.add_argument('--seasons', type=str,
                       help='Comma-separated list of seasons (e.g., "2018-19,2019-20")')
     parser.add_argument('--top_n', type=int, default=50,
                       help='Number of top players to analyze (default: 50)')
@@ -304,8 +513,34 @@ def analyze_players(top_players_df, seasons, shot_type, metric, rho, penalty, mi
 def main():
     args = parse_arguments()
     
-    # Process seasons
-    seasons = [s.strip() for s in args.seasons.split(',')]
+    # Determine if we should use interactive mode
+    use_interactive = args.interactive or (len(sys.argv) == 1 and INTERACTIVE_AVAILABLE)
+    
+    if use_interactive:
+        config = interactive_setup()
+        seasons = config['seasons']
+        # Convert config to args-like object for compatibility
+        args.top_n = config['top_n']
+        args.min_shots = config['min_shots']
+        args.shot_type = config['shot_type']
+        args.metric = config['metric']
+        args.output = config['output']
+        args.rho = 0.9  # Default values for interactive mode
+        args.penalty = 0.1
+    else:
+        if not args.seasons:
+            print("Error: --seasons is required when not using interactive mode")
+            print("Use --interactive or -i for guided setup")
+            sys.exit(1)
+        seasons = [s.strip() for s in args.seasons.split(',')]
+        config = {
+            'seasons': seasons,
+            'top_n': args.top_n,
+            'min_shots': args.min_shots,
+            'shot_type': args.shot_type,
+            'metric': args.metric,
+            'output': args.output
+        }
     
     # Get top players by total minutes across all specified seasons
     top_players = get_top_players_across_seasons(seasons, top_n=args.top_n)
@@ -333,32 +568,37 @@ def main():
         # Add ranking column
         results['RANK'] = range(1, len(results) + 1)
         
-        # Display top 20 streakiest shooters (or all if fewer)
-        display_count = min(20, len(results))
-        
-        if args.metric == 'run':
-            print(f"\nTop {display_count} Streakiest Shooters (by S index, lower = more streaky):")
-            score_col = 'STREAKINESS_S'
+        # Use enhanced display if available, otherwise fallback
+        if use_interactive and console:
+            enhanced_display_results(results, config)
         else:
-            print(f"\nTop {display_count} Streakiest Shooters (by momentum score, higher = more streaky):")
-            score_col = 'MOMENTUM_SCORE'
+            # Original display logic
             
-        top_results = results.head(display_count)
-        display_cols = ['RANK', 'PLAYER_NAME', 'SHOTS', 'MADE', 'FG_PCT', score_col]
-        print(top_results[display_cols].to_string(index=False))
+            if args.metric == 'run':
+                print(f"\nAll {len(results)} Streakiest Shooters (by S index, lower = more streaky):")
+                score_col = 'STREAKINESS_S'
+            else:
+                print(f"\nAll {len(results)} Streakiest Shooters (by momentum score, higher = more streaky):")
+                score_col = 'MOMENTUM_SCORE'
+                
+            display_cols = ['RANK', 'PLAYER_NAME', 'SHOTS', 'MADE', 'FG_PCT', score_col]
+            print(results[display_cols].to_string(index=False))
+            
+            # Additional statistics
+            print(f"\nStatistics on {metric_name}:")
+            print(f"Mean: {results[score_col].mean():.3f}")
+            print(f"Median: {results[score_col].median():.3f}")
+            print(f"Min: {results[score_col].min():.3f}")
+            print(f"Max: {results[score_col].max():.3f}")
         
         # Save full results to CSV if specified
         if args.output:
             results.to_csv(args.output, index=False)
-            print(f"\nFull results saved to {args.output}")
+            if console:
+                console.print(f"\n✅ Full results saved to: {args.output}")
+            else:
+                print(f"\nFull results saved to {args.output}")
             
-        # Additional statistics
-        print(f"\nStatistics on {metric_name}:")
-        print(f"Mean: {results[score_col].mean():.3f}")
-        print(f"Median: {results[score_col].median():.3f}")
-        print(f"Min: {results[score_col].min():.3f}")
-        print(f"Max: {results[score_col].max():.3f}")
-        
         # Number of players analyzed
         print(f"\nAnalyzed {len(results)} players with at least {args.min_shots} {args.shot_type} shots across {len(seasons)} seasons.")
         print(f"({len(top_players) - len(results)} players were skipped due to insufficient shot data)")
@@ -371,4 +611,7 @@ def main():
 
 if __name__ == "__main__":
     results_df = main()
-    print("\nAnalysis completed successfully!") 
+    if console:
+        console.print("\n🎉 Analysis completed successfully!")
+    else:
+        print("\nAnalysis completed successfully!") 
