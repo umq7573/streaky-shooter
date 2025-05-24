@@ -4,7 +4,7 @@
 Streaky Rankings - Analyze the NBA's streakiest shooters by minutes played
 
 This script finds the top N players by minutes played across specified seasons,
-then ranks them by streakiness using the momentum score metric.
+then ranks them by streakiness using the run-based streakiness index S.
 """
 
 import pandas as pd
@@ -19,8 +19,8 @@ from nba_api.stats.static import players
 from nba_api.stats.endpoints import shotchartdetail, leagueleaders, playercareerstats
 from nba_api.stats.library.parameters import SeasonTypeAllStar
 
-# Import the momentum_score function from streaky.py
-from streaky import momentum_score, get_headers
+# Import the streakiness functions from streaky.py
+from streaky import run_based_streakiness, momentum_score, get_headers
 
 
 def parse_arguments():
@@ -35,10 +35,12 @@ def parse_arguments():
     parser.add_argument('--shot_type', type=str, default='3PT Field Goal',
                       choices=['All', '3PT Field Goal', '2PT Field Goal'],
                       help='Type of shots to analyze (default: "3PT Field Goal")')
+    parser.add_argument('--metric', type=str, default='run', choices=['run', 'momentum'],
+                      help='Streakiness metric to use: "run" (default) or "momentum" (legacy)')
     parser.add_argument('--rho', type=float, default=0.9,
-                      help='Persistence factor for momentum score (default: 0.9)')
+                      help='Persistence factor for momentum metric (ignored for run metric, default: 0.9)')
     parser.add_argument('--penalty', type=float, default=0.1,
-                      help='Penalty scale for momentum score (default: 0.1)')
+                      help='Penalty scale for momentum metric (ignored for run metric, default: 0.1)')
     parser.add_argument('--output', type=str, default=None,
                       help='Output CSV file path for full results (optional)')
     return parser.parse_args()
@@ -209,7 +211,7 @@ def get_shot_chart_data(player_id, team_id, season, season_type='Regular Season'
     return pd.DataFrame()  # Default return if all attempts fail
 
 
-def analyze_players(top_players_df, seasons, shot_type, rho, penalty, min_shots):
+def analyze_players(top_players_df, seasons, shot_type, metric, rho, penalty, min_shots):
     """Analyze shooting streakiness for a list of players across specified seasons."""
     results = []
     
@@ -252,19 +254,25 @@ def analyze_players(top_players_df, seasons, shot_type, rho, penalty, min_shots)
                     
                     # Only analyze if we have enough shots
                     if len(all_shots_series) >= min_shots:
-                        # Calculate the momentum score
-                        score = momentum_score(all_shots_series.to_numpy(), rho, penalty)
+                        # Calculate the streakiness score based on chosen metric
+                        if metric == 'run':
+                            score = run_based_streakiness(all_shots_series.to_numpy())
+                            score_column = 'STREAKINESS_S'
+                        else:  # momentum
+                            score = momentum_score(all_shots_series.to_numpy(), rho, penalty)
+                            score_column = 'MOMENTUM_SCORE'
                         
                         # Collect results
-                        results.append({
+                        result_dict = {
                             'PLAYER_ID': player_id,
                             'PLAYER_NAME': player_name,
                             'TOTAL_MIN': player['MIN'],
                             'SHOTS': len(all_shots_series),
                             'MADE': int(all_shots_series.sum()),
                             'FG_PCT': round(all_shots_series.mean(), 3),
-                            'MOMENTUM_SCORE': round(score, 3)
-                        })
+                            score_column: round(score, 3)
+                        }
+                        results.append(result_dict)
                     else:
                         print(f"Skipping {player_name}: Only {len(all_shots_series)} shots (minimum {min_shots} required)")
                 else:
@@ -283,7 +291,12 @@ def analyze_players(top_players_df, seasons, shot_type, rho, penalty, min_shots)
     # Convert to DataFrame and sort by score
     results_df = pd.DataFrame(results)
     if not results_df.empty:
-        results_df = results_df.sort_values('MOMENTUM_SCORE', ascending=False).reset_index(drop=True)
+        if metric == 'run':
+            # For run-based metric, lower scores are more streaky
+            results_df = results_df.sort_values('STREAKINESS_S', ascending=True).reset_index(drop=True)
+        else:
+            # For momentum metric, higher scores are more streaky
+            results_df = results_df.sort_values('MOMENTUM_SCORE', ascending=False).reset_index(drop=True)
     
     return results_df
 
@@ -303,11 +316,13 @@ def main():
         print(f"  {player['PLAYER']}: {player['MIN']} minutes")
     
     # Analyze players
-    print(f"\nAnalyzing these {args.top_n} players for streakiness in {args.shot_type} shots...")
+    metric_name = "run-based streakiness index S" if args.metric == 'run' else "momentum score"
+    print(f"\nAnalyzing these {args.top_n} players for {metric_name} in {args.shot_type} shots...")
     results = analyze_players(
         top_players, 
         seasons, 
         args.shot_type, 
+        args.metric,
         args.rho, 
         args.penalty,
         args.min_shots
@@ -320,9 +335,16 @@ def main():
         
         # Display top 20 streakiest shooters (or all if fewer)
         display_count = min(20, len(results))
-        print(f"\nTop {display_count} Streakiest Shooters:")
+        
+        if args.metric == 'run':
+            print(f"\nTop {display_count} Streakiest Shooters (by S index, lower = more streaky):")
+            score_col = 'STREAKINESS_S'
+        else:
+            print(f"\nTop {display_count} Streakiest Shooters (by momentum score, higher = more streaky):")
+            score_col = 'MOMENTUM_SCORE'
+            
         top_results = results.head(display_count)
-        display_cols = ['RANK', 'PLAYER_NAME', 'SHOTS', 'MADE', 'FG_PCT', 'MOMENTUM_SCORE']
+        display_cols = ['RANK', 'PLAYER_NAME', 'SHOTS', 'MADE', 'FG_PCT', score_col]
         print(top_results[display_cols].to_string(index=False))
         
         # Save full results to CSV if specified
@@ -331,11 +353,11 @@ def main():
             print(f"\nFull results saved to {args.output}")
             
         # Additional statistics
-        print("\nStatistics on Momentum Scores:")
-        print(f"Mean: {results['MOMENTUM_SCORE'].mean():.3f}")
-        print(f"Median: {results['MOMENTUM_SCORE'].median():.3f}")
-        print(f"Min: {results['MOMENTUM_SCORE'].min():.3f}")
-        print(f"Max: {results['MOMENTUM_SCORE'].max():.3f}")
+        print(f"\nStatistics on {metric_name}:")
+        print(f"Mean: {results[score_col].mean():.3f}")
+        print(f"Median: {results[score_col].median():.3f}")
+        print(f"Min: {results[score_col].min():.3f}")
+        print(f"Max: {results[score_col].max():.3f}")
         
         # Number of players analyzed
         print(f"\nAnalyzed {len(results)} players with at least {args.min_shots} {args.shot_type} shots across {len(seasons)} seasons.")

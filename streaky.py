@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-streaky.py  –  pull NBA shot data and compute a simple momentum
-               streakiness score in one script.
+streaky.py  –  pull NBA shot data and compute streakiness metrics
+               in one script.
 
 Dependencies
 ------------
@@ -20,12 +20,117 @@ from requests.exceptions import RequestException
 
 
 # ----------------------------------------------------------------------
-# Metric: momentum score
+# Helper functions for run-based streakiness
+# ----------------------------------------------------------------------
+def _r_min(k: int, n: int) -> int:
+    """
+    Minimum possible number of runs for k makes out of n shots.
+    
+    Args:
+        k: Number of makes
+        n: Total number of shots
+        
+    Returns:
+        Minimum number of runs
+    """
+    if k == 0 or k == n:
+        return 1  # All misses or all makes = 1 run
+    return 2  # All makes together, then all misses together (or vice versa)
+
+
+def _r_max(k: int, n: int) -> int:
+    """
+    Maximum possible number of runs for k makes out of n shots.
+    
+    Args:
+        k: Number of makes
+        n: Total number of shots
+        
+    Returns:
+        Maximum number of runs
+    """
+    if k == 0 or k == n:
+        return 1  # All misses or all makes = 1 run
+    
+    # For alternating pattern
+    if k == n - k:  # Equal makes and misses
+        return 2 * k  # Perfect alternation: 1,0,1,0,1,0
+    else:
+        return 2 * min(k, n - k) + 1  # Minority outcome fully alternated
+
+
+def _count_runs(flags: np.ndarray) -> int:
+    """
+    Count the number of runs in a binary sequence using vectorized operations.
+    
+    Args:
+        flags: Binary array of 0s and 1s
+        
+    Returns:
+        Number of runs in the sequence
+    """
+    if len(flags) <= 1:
+        return 1
+    
+    # Use np.diff to find where values change, then count transitions + 1
+    transitions = np.sum(np.diff(flags) != 0)
+    return transitions + 1
+
+
+def run_based_streakiness(flags: np.ndarray) -> float:
+    """
+    Compute the run-based streakiness index S.
+    
+    S = (R - R_min) / (R_max - R_min)
+    
+    Where:
+    - R is the actual number of runs
+    - R_max is the maximum possible runs for this make/miss distribution
+    - R_min is the minimum possible runs for this make/miss distribution
+    
+    Args:
+        flags: 0/1 array of SHOT_MADE_FLAG in chronological order
+        
+    Returns:
+        Streakiness index S in range [0, 1], where 0 = most streaky, 1 = most random
+    """
+    if flags.size <= 1:
+        return 0.0  # Degenerate case
+    
+    n = len(flags)
+    k = int(flags.sum())  # Number of makes
+    
+    # Handle degenerate cases
+    if k == 0 or k == n:
+        return 0.0  # All makes or all misses = perfectly streaky
+    
+    # Count actual runs
+    r_actual = _count_runs(flags)
+    
+    # Compute theoretical bounds
+    r_min = _r_min(k, n)
+    r_max = _r_max(k, n)
+    
+    # Handle edge case where r_min == r_max
+    if r_max == r_min:
+        return 0.0
+    
+    # Compute streakiness index (corrected formula)
+    s = (r_actual - r_min) / (r_max - r_min)
+    
+    # Ensure result is in [0, 1] range
+    return max(0.0, min(1.0, s))
+
+
+# ----------------------------------------------------------------------
+# Legacy momentum score (for backward compatibility)
 # ----------------------------------------------------------------------
 def momentum_score(flags: np.ndarray,
                    rho: float = 0.9,
                    penalty_scale: float = 0.1) -> float:
     """
+    Legacy momentum-based streakiness metric.
+    
     flags : 0/1 array of SHOT_MADE_FLAG in chronological order.
     rho   : persistence factor (0–1). Higher = longer memory.
     penalty_scale : extra kick when the shot flips momentum's sign.
@@ -182,13 +287,17 @@ def fetch_shots(pid: int,
 # CLI glue
 # ----------------------------------------------------------------------
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Compute momentum streakiness")
+    ap = argparse.ArgumentParser(description="Compute shooting streakiness metrics")
     ap.add_argument("--players", required=True,
                     help="Comma-separated full names (e.g. 'Stephen Curry,Klay Thompson')")
     ap.add_argument("--seasons", required=True,
                     help="Comma-separated seasons (e.g. '2019-20,2020-21')")
-    ap.add_argument("--rho", type=float, default=0.9)
-    ap.add_argument("--penalty", type=float, default=0.1)
+    ap.add_argument("--metric", default="run", choices=["run", "momentum"],
+                    help="Streakiness metric to use: 'run' (default) or 'momentum' (legacy)")
+    ap.add_argument("--rho", type=float, default=0.9,
+                    help="Persistence factor for momentum metric (ignored for run metric)")
+    ap.add_argument("--penalty", type=float, default=0.1,
+                    help="Penalty scale for momentum metric (ignored for run metric)")
     ap.add_argument("--shot_type", default="All",
                     choices=["All", "3PT Field Goal", "2PT Field Goal"])
     ap.add_argument("--max_retries", type=int, default=3,
@@ -225,12 +334,18 @@ def main(argv=None):
                 print(f"No shots found for {name}, skipping...")
                 continue
                 
-            # Calculate the momentum score
-            score = momentum_score(flags.to_numpy(), args.rho, args.penalty)
+            # Calculate the streakiness score based on chosen metric
+            if args.metric == "run":
+                score = run_based_streakiness(flags.to_numpy())
+                score_label = "S"
+            else:  # momentum
+                score = momentum_score(flags.to_numpy(), args.rho, args.penalty)
+                score_label = "momentum"
             
             rows.append({
                 "player": name,
                 "shots": int(flags.size),
+                "metric": score_label,
                 "score": round(score, 3)
             })
             
@@ -241,7 +356,14 @@ def main(argv=None):
         print("No data found for any player. Check parameters and try again.")
         return
 
-    df = pd.DataFrame(rows).sort_values("score", ascending=False)
+    df = pd.DataFrame(rows)
+    if args.metric == "run":
+        df = df.sort_values("score", ascending=True)  # Lower S = more streaky
+        print("Results (sorted by streakiness index S, lower = more streaky):")
+    else:
+        df = df.sort_values("score", ascending=False)  # Higher momentum = more streaky
+        print("Results (sorted by momentum score, higher = more streaky):")
+    
     print(df.to_string(index=False))
 
 
