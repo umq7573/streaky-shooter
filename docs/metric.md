@@ -38,8 +38,9 @@ For k makes out of n total shots:
 
 **Maximum runs (R_max)**:
 - If k = 0 or k = n: R_max = 1 (all same outcome)
-- If k = n-k (equal makes and misses): R_max = 2k (perfect alternation)
-- Otherwise: R_max = 2×min(k, n-k) + 1 (minority outcome fully alternated)
+- Otherwise: R_max = 2×min(k, n-k) + 1_{k ≠ n-k}
+
+Where 1_{k ≠ n-k} is an indicator function (1 when k ≠ n-k, 0 when k = n-k). This accounts for the "dangling block" effect: when one outcome outnumbers the other, the alternating pattern ends with an extra run of the majority outcome.
 
 ## Worked Examples
 

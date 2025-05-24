@@ -52,11 +52,9 @@ def _r_max(k: int, n: int) -> int:
     if k == 0 or k == n:
         return 1  # All misses or all makes = 1 run
     
-    # For alternating pattern
-    if k == n - k:  # Equal makes and misses
-        return 2 * k  # Perfect alternation: 1,0,1,0,1,0
-    else:
-        return 2 * min(k, n - k) + 1  # Minority outcome fully alternated
+    # Compact formula: R_max = 2 * min(k, n-k) + 1_{k ≠ n-k}
+    # The indicator function adds 1 when unbalanced (dangling majority block)
+    return 2 * min(k, n - k) + int(k != n - k)
 
 
 def _count_runs(flags: np.ndarray) -> int:
